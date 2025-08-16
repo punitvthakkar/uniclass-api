@@ -20,7 +20,7 @@ async function getBatchEmbeddings(texts) {
   }
 }
 
-// --- MAIN HANDLER (REWRITTEN WITH PARALLEL DATABASE QUERIES) ---
+// --- MAIN HANDLER (REWRITTEN TO USE THE NEW SUPABASE BATCH FUNCTION) ---
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -38,7 +38,7 @@ export default async function handler(req, res) {
     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
     const queryTexts = queries.map(q => q.query);
 
-    // Step 1: Get all embeddings from Gemini (this part works).
+    // Step 1: Get all embeddings from Gemini. This is unchanged and works correctly.
     const CHUNK_SIZE = 100;
     const embeddingPromises = [];
     for (let i = 0; i < queryTexts.length; i += CHUNK_SIZE) {
@@ -47,59 +47,73 @@ export default async function handler(req, res) {
     const embeddingChunks = await Promise.all(embeddingPromises);
     const embeddings = embeddingChunks.flat();
 
-    console.log(`Received ${embeddings.filter(e => e).length}/${queries.length} unique embeddings from Gemini.`);
+    console.log(`Received ${embeddings.filter(e => e).length}/${queries.length} embeddings from Gemini.`);
 
-    // Step 2: Create an array of promises, one for each database query.
-    // This is the new, robust logic that replaces the faulty sequential 'for' loop.
-    const supabasePromises = queries.map(async (query, i) => {
-      const { uniclass_type, output_format = 'COBIE', request_id } = query;
-      const queryEmbedding = embeddings[i];
-
-      if (!queryEmbedding) {
-        return { request_id: request_id || i, match: 'Embedding failed:0.00', confidence: 0, alternatives: [] };
-      }
-
-      const { data, error } = await supabase.rpc('match_uniclass', {
-        query_embedding: queryEmbedding,
-        uniclass_type_filter: uniclass_type.toUpperCase(),
-        match_threshold: 0.1,
-        match_count: 3
-      });
-
-      if (error) {
-        console.error('Supabase error for request_id', request_id, ':', error);
-        return { request_id: request_id || i, match: 'Database error:0.00', confidence: 0, alternatives: [] };
-      }
-      if (!data || data.length === 0) {
-        return { request_id: request_id || i, match: 'No match found:0.00', confidence: 0, alternatives: [] };
-      }
-      
-      const best = data[0];
-      let result_text;
-      switch (output_format.toUpperCase()) {
-        case 'CODE': result_text = best.code; break;
-        case 'TITLE': result_text = best.title; break;
-        default: result_text = `${best.code}:${best.title}`;
-      }
-      const scoreFormatted = best.similarity.toFixed(2);
-      const finalResult = `${result_text}:${scoreFormatted}`;
-
-      return {
-        request_id: request_id || i,
-        match: finalResult,
-        confidence: best.similarity,
-        alternatives: data.slice(1).map(item => ({ code: item.code, title: item.title, confidence: item.similarity }))
-      };
+    // Step 2: Prepare the data arrays to send to our new Supabase batch function.
+    const batch_request_ids = [];
+    const batch_embeddings = [];
+    const batch_uniclass_types = [];
+    
+    queries.forEach((query, i) => {
+        // Only include queries that successfully received an embedding
+        if (embeddings[i]) {
+            batch_request_ids.push(query.request_id || i);
+            batch_embeddings.push(embeddings[i]);
+            batch_uniclass_types.push(query.uniclass_type.toUpperCase());
+        }
     });
 
-    // Step 3: Execute all the database queries in parallel.
-    const results = await Promise.all(supabasePromises);
+    // Step 3: Make a SINGLE call to the new Supabase batch function.
+    const { data: batchData, error: batchError } = await supabase.rpc('batch_match_uniclass', {
+        p_request_ids: batch_request_ids,
+        p_query_embeddings: batch_embeddings,
+        p_uniclass_type_filters: batch_uniclass_types
+    });
 
-    // The VBA script needs the results to be in the original order. We must re-sort them.
-    const sortedResults = results.sort((a, b) => a.request_id - b.request_id);
+    if (batchError) {
+      console.error('Supabase batch function error:', batchError);
+      return res.status(500).json({ error: 'Database batch processing failed' });
+    }
 
-    console.log(`Batch processing complete: ${sortedResults.length} results returned.`);
-    return res.json({ success: true, processed: sortedResults.length, results: sortedResults });
+    // Step 4: Map the results from the batch call back into the format the VBA expects.
+    const resultsMap = new Map();
+    batchData.forEach(item => {
+        let result_text;
+        const output_format = queries[item.request_id]?.output_format?.toUpperCase() || 'COBIE';
+
+        switch (output_format) {
+            case 'CODE': result_text = item.code; break;
+            case 'TITLE': result_text = item.title; break;
+            default: result_text = `${item.code}:${item.title}`;
+        }
+        const scoreFormatted = item.similarity.toFixed(2);
+        const finalResult = `${result_text}:${scoreFormatted}`;
+
+        resultsMap.set(Number(item.request_id), {
+            request_id: Number(item.request_id),
+            match: finalResult,
+            confidence: item.similarity,
+            alternatives: [] // Note: The batch function doesn't currently support alternatives
+        });
+    });
+
+    // Ensure every original query gets a response, even if it failed.
+    const finalResults = queries.map((query, i) => {
+        const requestId = query.request_id || i;
+        if (resultsMap.has(requestId)) {
+            return resultsMap.get(requestId);
+        }
+        // Return a default "no match" or "error" if it wasn't processed.
+        return {
+            request_id: requestId,
+            match: embeddings[i] ? 'No match found:0.00' : 'Embedding failed:0.00',
+            confidence: 0,
+            alternatives: []
+        };
+    });
+
+    console.log(`Batch processing complete: ${finalResults.length} results returned.`);
+    return res.json({ success: true, processed: finalResults.length, results: finalResults });
 
   } catch (error) {
     console.error('Batch API Handler Error:', error);

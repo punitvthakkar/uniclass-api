@@ -38,19 +38,22 @@ export default async function handler(req, res) {
     const queryTexts = queries.map(q => q.query)
     console.log(`Extracted ${queryTexts.length} texts for batch embedding`)
 
-    // Get batch embeddings from Gemini (matching your Python approach)
+    // Get batch embeddings from Gemini using the correct synchronous batch endpoint
     const embeddings = await getBatchEmbeddings(queryTexts)
     if (!embeddings || embeddings.length !== queryTexts.length) {
+      console.error('Failed to get batch embeddings or count mismatch.');
       return res.status(500).json({ error: 'Failed to get batch embeddings' })
     }
 
     console.log(`Got ${embeddings.length} embeddings from Gemini`)
 
     // Process each query with its corresponding embedding
+    // NOTE: This part still makes N calls to Supabase, which we can optimize in Step 2.
+    // For now, this is a huge improvement as it makes only 1 call to Gemini.
     const results = []
     
     for (let i = 0; i < queries.length; i++) {
-      const { query, uniclass_type, output_format = 'COBIE', request_id } = queries[i]
+      const { uniclass_type, output_format = 'COBIE', request_id } = queries[i]
       const queryEmbedding = embeddings[i]
       
       try {
@@ -148,49 +151,55 @@ export default async function handler(req, res) {
   }
 }
 
-// Batch embedding function (matching your Python approach)
-// Batch embedding function (using correct Gemini REST API format)
-// Batch embedding function (trying with "contents" plural)
+
+// --- START OF MODIFIED SECTION ---
+// This function is now corrected to use the proper synchronous batch embedding endpoint.
 async function getBatchEmbeddings(texts) {
   try {
-    console.log(`Getting batch embeddings for ${texts.length} texts`)
+    console.log(`Getting batch embeddings for ${texts.length} texts via batchEmbedContents endpoint.`);
     
-    // Try with "contents" (plural) like the JavaScript SDK
+    // Construct the request body for the batchEmbedContents endpoint.
+    // It requires a 'requests' array, where each element is a single embedding request.
     const requestBody = {
-      model: 'models/text-embedding-004',
-      contents: texts.map(text => ({
-        parts: [{ text: text }]
+      requests: texts.map(text => ({
+        model: 'models/text-embedding-004',
+        content: {
+          parts: [{ text: text }]
+        }
       }))
-    }
+    };
 
+    // Note the change in the URL to use ':batchEmbedContents'
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       }
-    )
+    );
 
     if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`Gemini API error: ${response.status} - ${errorText}`)
+      const errorText = await response.text();
+      console.error(`Gemini API error response: ${errorText}`);
+      throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
     }
 
-    const data = await response.json()
-    console.log(`Gemini API response received, checking format...`)
+    const data = await response.json();
     
-    // The response should contain embeddings array
+    // The response for batch contains an 'embeddings' array
     if (data.embeddings && Array.isArray(data.embeddings)) {
-      console.log(`Successfully got ${data.embeddings.length} embeddings`)
-      return data.embeddings.map(emb => emb.values)
+      console.log(`Successfully got ${data.embeddings.length} embeddings.`);
+      // Extract the 'values' from each object in the 'embeddings' array
+      return data.embeddings.map(emb => emb.values);
     } else {
-      console.log('Response format:', Object.keys(data))
-      throw new Error('Unexpected response format from Gemini API')
+      console.error('Unexpected response format from Gemini batch API:', data);
+      throw new Error('Unexpected response format from Gemini API');
     }
     
   } catch (error) {
-    console.error('Batch embedding error:', error)
-    return null
+    console.error('Batch embedding function error:', error);
+    return null;
   }
 }
+// --- END OF MODIFIED SECTION ---

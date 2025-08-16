@@ -1,59 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
 
-// getBatchEmbeddings function remains the same as it is working correctly.
-async function getBatchEmbeddings(texts) { /* ... same as before ... */ }
-// For brevity, I'm hiding the unchanged getBatchEmbeddings function.
-// The full code block is below this explanation.
-
-export default async function handler(req, res) {
-  // ... CORS and method checks ...
-
-  try {
-    const { queries } = req.body;
-    // ... input validation ...
-
-    console.log("--- Vercel Function Triggered ---");
-    console.log("Raw incoming queries from Excel:", JSON.stringify(queries, null, 2));
-
-    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-    const queryTexts = queries.map(q => q.query);
-    
-    // ... Get embeddings from Gemini (unchanged) ...
-
-    const batch_request_ids = [];
-    const batch_embeddings = [];
-    const batch_uniclass_types = [];
-    
-    queries.forEach((query, i) => {
-        if (embeddings[i]) {
-            batch_request_ids.push(query.request_id || i);
-            batch_embeddings.push(JSON.stringify(embeddings[i]));
-            batch_uniclass_types.push(query.uniclass_type.toUpperCase());
-        }
-    });
-
-    console.log("--- Data being sent to Supabase RPC 'batch_match_uniclass' ---");
-    console.log("Request IDs:", JSON.stringify(batch_request_ids));
-    console.log("Uniclass Types:", JSON.stringify(batch_uniclass_types));
-    console.log("First Embedding String:", batch_embeddings.length > 0 ? batch_embeddings[0] : "N/A");
-    console.log("---------------------------------------------------------");
-
-    const { data: batchData, error: batchError } = await supabase.rpc('batch_match_uniclass', {
-        p_request_ids: batch_request_ids,
-        p_query_embeddings: batch_embeddings,
-        p_uniclass_type_filters: batch_uniclass_types
-    });
-
-    // ... rest of the function is unchanged ...
-  } catch (error) {
-    // ... error handling ...
-  }
-}
-
-// --- FULL CODE TO COPY ---
-// The above snippet was for explanation. Use this full block for the file.
-import { createClient } from '@supabase/supabase-js'
-
 async function getBatchEmbeddings(texts) {
   try {
     const modelName = 'models/text-embedding-004';

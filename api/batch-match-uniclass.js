@@ -1,74 +1,59 @@
 import { createClient } from '@supabase/supabase-js'
 
 export default async function handler(req, res) {
-  // Enable CORS for Excel to call this API
+  // Standard CORS and method checks
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end()
-  }
-  
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' })
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { queries } = req.body
-    
+    const { queries } = req.body;
     if (!queries || !Array.isArray(queries) || queries.length === 0) {
-      return res.status(400).json({ error: 'Missing or invalid queries array' })
+      return res.status(400).json({ error: 'Missing or invalid queries array' });
     }
-    
     if (queries.length > 2000) {
-      return res.status(400).json({ error: 'Maximum 2000 queries per batch' })
+      return res.status(400).json({ error: 'Maximum 2000 queries per batch' });
     }
 
-    console.log(`Processing batch of ${queries.length} queries`)
+    console.log(`Processing batch of ${queries.length} queries.`);
 
-    const supabase = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_ANON_KEY
-    )
+    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+    const queryTexts = queries.map(q => q.query);
 
-    const queryTexts = queries.map(q => q.query)
-    
-    const CHUNK_SIZE = 100; // Gemini API limit
+    // Chunking logic to respect the 100-item limit per batch call
+    const CHUNK_SIZE = 100;
     const embeddingPromises = [];
-    
     console.log(`Splitting ${queryTexts.length} texts into chunks of ${CHUNK_SIZE}`);
-
     for (let i = 0; i < queryTexts.length; i += CHUNK_SIZE) {
       const chunk = queryTexts.slice(i, i + CHUNK_SIZE);
       embeddingPromises.push(getBatchEmbeddings(chunk));
     }
-    
+
     const embeddingChunks = await Promise.all(embeddingPromises);
     const embeddings = embeddingChunks.flat();
 
-    if (!embeddings || embeddings.length !== queryTexts.length) {
-      console.error('Failed to get batch embeddings or count mismatch after chunking.');
-      return res.status(500).json({ error: 'Failed to get batch embeddings' })
+    const successfulEmbeddings = embeddings.filter(e => e !== null).length;
+    console.log(`Got ${successfulEmbeddings}/${embeddings.length} embeddings from Gemini.`);
+
+    if (successfulEmbeddings === 0 && embeddings.length > 0) {
+        return res.status(500).json({ error: 'Failed to get any embeddings from the API.' });
     }
 
-    console.log(`Got ${embeddings.length} embeddings from Gemini`)
-
-    const results = []
-    
+    const results = [];
     for (let i = 0; i < queries.length; i++) {
-      const { uniclass_type, output_format = 'COBIE', request_id } = queries[i]
-      const queryEmbedding = embeddings[i]
-      
+      const { uniclass_type, output_format = 'COBIE', request_id } = queries[i];
+      const queryEmbedding = embeddings[i];
+
       try {
         if (!queryEmbedding) {
           results.push({
             request_id: request_id || i,
             match: 'Embedding failed:0.00',
-            confidence: 0,
-            alternatives: []
-          })
-          continue
+            confidence: 0, alternatives: []
+          });
+          continue;
         }
 
         const { data, error } = await supabase.rpc('match_uniclass', {
@@ -76,45 +61,37 @@ export default async function handler(req, res) {
           uniclass_type_filter: uniclass_type.toUpperCase(),
           match_threshold: 0.1,
           match_count: 3
-        })
+        });
 
         if (error) {
-          console.error('Supabase error for query', i, ':', error)
+          console.error('Supabase error for query', i, ':', error);
           results.push({
             request_id: request_id || i,
             match: 'Database error:0.00',
-            confidence: 0,
-            alternatives: []
-          })
-          continue
+            confidence: 0, alternatives: []
+          });
+          continue;
         }
 
         if (!data || data.length === 0) {
           results.push({
             request_id: request_id || i,
             match: 'No match found:0.00',
-            confidence: 0,
-            alternatives: []
-          })
-          continue
+            confidence: 0, alternatives: []
+          });
+          continue;
         }
 
-        const best = data[0]
-        let result_text
-        
+        const best = data[0];
+        let result_text;
         switch (output_format.toUpperCase()) {
-          case 'CODE':
-            result_text = best.code
-            break
-          case 'TITLE':
-            result_text = best.title
-            break
-          default:
-            result_text = `${best.code}:${best.title}`
+          case 'CODE': result_text = best.code; break;
+          case 'TITLE': result_text = best.title; break;
+          default: result_text = `${best.code}:${best.title}`;
         }
         
-        const scoreFormatted = best.similarity.toFixed(2)
-        const finalResult = `${result_text}:${scoreFormatted}`
+        const scoreFormatted = best.similarity.toFixed(2);
+        const finalResult = `${result_text}:${scoreFormatted}`;
 
         results.push({
           request_id: request_id || i,
@@ -125,51 +102,45 @@ export default async function handler(req, res) {
             title: item.title,
             confidence: item.similarity
           }))
-        })
+        });
 
       } catch (error) {
-        console.error('Error processing query', i, ':', error)
+        console.error('Error processing query', i, ':', error);
         results.push({
           request_id: request_id || i,
           match: 'Processing error:0.00',
-          confidence: 0,
-          alternatives: []
-        })
+          confidence: 0, alternatives: []
+        });
       }
     }
 
-    console.log(`Batch processing complete: ${results.length} results`)
-
-    res.json({
-      success: true,
-      processed: results.length,
-      results: results
-    })
+    console.log(`Batch processing complete: ${results.length} results returned.`);
+    res.json({ success: true, processed: results.length, results: results });
 
   } catch (error) {
-    console.error('Batch API Error:', error)
-    res.status(500).json({ error: 'Internal server error' })
+    console.error('Batch API Handler Error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 }
 
+// --- THIS FUNCTION IS NOW CORRECT PER OFFICIAL DOCUMENTATION ---
 async function getBatchEmbeddings(texts) {
   try {
+    const modelName = 'models/text-embedding-004';
     console.log(`Getting batch embeddings for a chunk of ${texts.length} texts.`);
     
-    // --- START OF MODIFIED SECTION ---
-    // Corrected the request body to REMOVE the 'model' key from each request item.
-    // The model is already specified in the fetch URL.
+    // This request body structure now EXACTLY matches the official documentation.
     const requestBody = {
       requests: texts.map(text => ({
+        model: modelName,
         content: {
           parts: [{ text: text }]
         }
       }))
     };
-    // --- END OF MODIFIED SECTION ---
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/${modelName}:batchEmbedContents?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -197,3 +168,5 @@ async function getBatchEmbeddings(texts) {
     return new Array(texts.length).fill(null);
   }
 }
+
+

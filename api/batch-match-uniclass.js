@@ -34,31 +34,26 @@ export default async function handler(req, res) {
       process.env.SUPABASE_ANON_KEY
     )
 
-    // Extract unique text queries for batch embedding
-    const uniqueTexts = [...new Set(queries.map(q => q.query))]
-    console.log(`${uniqueTexts.length} unique texts to embed`)
+    // Extract all query texts for batch embedding
+    const queryTexts = queries.map(q => q.query)
+    console.log(`Extracted ${queryTexts.length} texts for batch embedding`)
 
-    // Get batch embeddings from Gemini
-    const embeddings = await getBatchEmbeddings(uniqueTexts)
-    if (!embeddings) {
+    // Get batch embeddings from Gemini (matching your Python approach)
+    const embeddings = await getBatchEmbeddings(queryTexts)
+    if (!embeddings || embeddings.length !== queryTexts.length) {
       return res.status(500).json({ error: 'Failed to get batch embeddings' })
     }
 
-    // Create mapping from text to embedding
-    const textToEmbedding = {}
-    uniqueTexts.forEach((text, index) => {
-      textToEmbedding[text] = embeddings[index]
-    })
+    console.log(`Got ${embeddings.length} embeddings from Gemini`)
 
-    // Process each query
+    // Process each query with its corresponding embedding
     const results = []
     
     for (let i = 0; i < queries.length; i++) {
       const { query, uniclass_type, output_format = 'COBIE', request_id } = queries[i]
+      const queryEmbedding = embeddings[i]
       
       try {
-        const queryEmbedding = textToEmbedding[query]
-        
         if (!queryEmbedding) {
           results.push({
             request_id: request_id || i,
@@ -153,34 +148,44 @@ export default async function handler(req, res) {
   }
 }
 
+// Batch embedding function (matching your Python approach)
 async function getBatchEmbeddings(texts) {
   try {
-    // Prepare batch request for Gemini
-    const requests = texts.map(text => ({
+    console.log(`Getting batch embeddings for ${texts.length} texts`)
+    
+    // Prepare batch request (matching Python: content=valid_texts)
+    const requestBody = {
       model: 'models/text-embedding-004',
-      content: { parts: [{ text }] }
-    }))
+      content: {
+        parts: texts.map(text => ({ text: text }))
+      }
+    }
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requests })
+        body: JSON.stringify(requestBody)
       }
     )
 
     if (!response.ok) {
-      throw new Error(`Gemini Batch API error: ${response.status}`)
+      throw new Error(`Gemini API error: ${response.status} - ${await response.text()}`)
     }
 
     const data = await response.json()
     
-    if (!data.embeddings) {
-      throw new Error('No embeddings in response')
+    // Handle response format (might be single embedding or array)
+    if (data.embedding && data.embedding.values) {
+      // Single embedding response - convert to array
+      return [data.embedding.values]
+    } else if (data.embeddings && Array.isArray(data.embeddings)) {
+      // Multiple embeddings response
+      return data.embeddings.map(emb => emb.values)
+    } else {
+      throw new Error('Unexpected response format from Gemini API')
     }
-
-    return data.embeddings.map(item => item.values)
     
   } catch (error) {
     console.error('Batch embedding error:', error)

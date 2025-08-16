@@ -20,7 +20,7 @@ async function getBatchEmbeddings(texts) {
   }
 }
 
-// --- MAIN HANDLER (REWRITTEN TO USE THE NEW SUPABASE BATCH FUNCTION) ---
+// --- MAIN HANDLER ---
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -38,7 +38,7 @@ export default async function handler(req, res) {
     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
     const queryTexts = queries.map(q => q.query);
 
-    // Step 1: Get all embeddings from Gemini. This is unchanged and works correctly.
+    // Step 1: Get all embeddings from Gemini.
     const CHUNK_SIZE = 100;
     const embeddingPromises = [];
     for (let i = 0; i < queryTexts.length; i += CHUNK_SIZE) {
@@ -49,21 +49,23 @@ export default async function handler(req, res) {
 
     console.log(`Received ${embeddings.filter(e => e).length}/${queries.length} embeddings from Gemini.`);
 
-    // Step 2: Prepare the data arrays to send to our new Supabase batch function.
+    // Step 2: Prepare the data arrays, with the corrected vector formatting.
     const batch_request_ids = [];
     const batch_embeddings = [];
     const batch_uniclass_types = [];
     
     queries.forEach((query, i) => {
-        // Only include queries that successfully received an embedding
         if (embeddings[i]) {
             batch_request_ids.push(query.request_id || i);
-            batch_embeddings.push(embeddings[i]);
+            // --- THIS IS THE FIX ---
+            // Explicitly stringify each vector into the format pgvector expects: '[...]'
+            batch_embeddings.push(JSON.stringify(embeddings[i]));
+            // --- END OF FIX ---
             batch_uniclass_types.push(query.uniclass_type.toUpperCase());
         }
     });
 
-    // Step 3: Make a SINGLE call to the new Supabase batch function.
+    // Step 3: Make the single call to the Supabase batch function.
     const { data: batchData, error: batchError } = await supabase.rpc('batch_match_uniclass', {
         p_request_ids: batch_request_ids,
         p_query_embeddings: batch_embeddings,
@@ -75,7 +77,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Database batch processing failed' });
     }
 
-    // Step 4: Map the results from the batch call back into the format the VBA expects.
+    // Step 4: Map the results back into the format the VBA expects.
     const resultsMap = new Map();
     batchData.forEach(item => {
         let result_text;
@@ -93,17 +95,15 @@ export default async function handler(req, res) {
             request_id: Number(item.request_id),
             match: finalResult,
             confidence: item.similarity,
-            alternatives: [] // Note: The batch function doesn't currently support alternatives
+            alternatives: []
         });
     });
 
-    // Ensure every original query gets a response, even if it failed.
     const finalResults = queries.map((query, i) => {
         const requestId = query.request_id || i;
         if (resultsMap.has(requestId)) {
             return resultsMap.get(requestId);
         }
-        // Return a default "no match" or "error" if it wasn't processed.
         return {
             request_id: requestId,
             match: embeddings[i] ? 'No match found:0.00' : 'Embedding failed:0.00',

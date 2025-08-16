@@ -149,16 +149,17 @@ export default async function handler(req, res) {
 }
 
 // Batch embedding function (matching your Python approach)
+// Batch embedding function (using correct Gemini REST API format)
 async function getBatchEmbeddings(texts) {
   try {
     console.log(`Getting batch embeddings for ${texts.length} texts`)
     
-    // Prepare batch request (matching Python: content=valid_texts)
+    // Prepare batch request (matching the official REST API format)
     const requestBody = {
       model: 'models/text-embedding-004',
-      content: {
-        parts: texts.map(text => ({ text: text }))
-      }
+      content: texts.map(text => ({
+        parts: [{ text: text }]
+      }))
     }
 
     const response = await fetch(
@@ -171,19 +172,19 @@ async function getBatchEmbeddings(texts) {
     )
 
     if (!response.ok) {
-      throw new Error(`Gemini API error: ${response.status} - ${await response.text()}`)
+      const errorText = await response.text()
+      throw new Error(`Gemini API error: ${response.status} - ${errorText}`)
     }
 
     const data = await response.json()
+    console.log(`Gemini API response received, checking format...`)
     
-    // Handle response format (might be single embedding or array)
-    if (data.embedding && data.embedding.values) {
-      // Single embedding response - convert to array
-      return [data.embedding.values]
-    } else if (data.embeddings && Array.isArray(data.embeddings)) {
-      // Multiple embeddings response
+    // The response should contain embeddings array
+    if (data.embeddings && Array.isArray(data.embeddings)) {
+      console.log(`Successfully got ${data.embeddings.length} embeddings`)
       return data.embeddings.map(emb => emb.values)
     } else {
+      console.log('Response format:', Object.keys(data))
       throw new Error('Unexpected response format from Gemini API')
     }
     

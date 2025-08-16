@@ -150,14 +150,15 @@ export default async function handler(req, res) {
 
 // Batch embedding function (matching your Python approach)
 // Batch embedding function (using correct Gemini REST API format)
+// Batch embedding function (trying with "contents" plural)
 async function getBatchEmbeddings(texts) {
   try {
     console.log(`Getting batch embeddings for ${texts.length} texts`)
     
-    // Prepare batch request (matching the official REST API format)
+    // Try with "contents" (plural) like the JavaScript SDK
     const requestBody = {
       model: 'models/text-embedding-004',
-      content: texts.map(text => ({
+      contents: texts.map(text => ({
         parts: [{ text: text }]
       }))
     }

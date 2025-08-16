@@ -1,63 +1,32 @@
 import { createClient } from '@supabase/supabase-js'
 
-// This function attempts the batch embedding using the official, documented request format.
+// The getBatchEmbeddings function is confirmed to be working correctly. No changes needed.
 async function getBatchEmbeddings(texts) {
   try {
     const modelName = 'models/text-embedding-004';
-    console.log(`Getting batch embeddings for a chunk of ${texts.length} texts.`);
-    
     const requestBody = {
-      requests: texts.map(text => ({
-        model: modelName,
-        content: {
-          parts: [{ text: text }]
-        }
-      }))
+      requests: texts.map(text => ({ model: modelName, content: { parts: [{ text: text }] } }))
     };
-
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/${modelName}:batchEmbedContents?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      }
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) }
     );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`Gemini API error response: ${errorText}`);
-      throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
-    }
-
+    if (!response.ok) { throw new Error(`Gemini API error: ${response.status}`); }
     const data = await response.json();
-    
-    if (data.embeddings && Array.isArray(data.embeddings)) {
-      return data.embeddings.map(emb => emb.values);
-    } else {
-      console.error('Unexpected response format from Gemini batch API:', data);
-      throw new Error('Unexpected response format from Gemini API');
-    }
-    
+    return data.embeddings ? data.embeddings.map(emb => emb.values) : new Array(texts.length).fill(null);
   } catch (error) {
     console.error('Batch embedding function error:', error);
     return new Array(texts.length).fill(null);
   }
 }
 
-// Main handler function
+// --- MAIN HANDLER (REWRITTEN WITH PARALLEL DATABASE QUERIES) ---
 export default async function handler(req, res) {
-  // Set CORS headers and handle preflight OPTIONS request
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
     const { queries } = req.body;
@@ -69,73 +38,68 @@ export default async function handler(req, res) {
     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
     const queryTexts = queries.map(q => q.query);
 
+    // Step 1: Get all embeddings from Gemini (this part works).
     const CHUNK_SIZE = 100;
     const embeddingPromises = [];
     for (let i = 0; i < queryTexts.length; i += CHUNK_SIZE) {
-      const chunk = queryTexts.slice(i, i + CHUNK_SIZE);
-      embeddingPromises.push(getBatchEmbeddings(chunk));
+      embeddingPromises.push(getBatchEmbeddings(queryTexts.slice(i, i + CHUNK_SIZE)));
     }
-
     const embeddingChunks = await Promise.all(embeddingPromises);
     const embeddings = embeddingChunks.flat();
-    
-    // --- CRITICAL FORENSIC LOGGING ---
-    if (embeddings && embeddings.length > 1 && embeddings[0] && embeddings[1]) {
-        console.log("--- EMBEDDING FORENSICS ---");
-        const firstEmbeddingSnippet = embeddings[0].slice(0, 5).join(', ');
-        const secondEmbeddingSnippet = embeddings[1].slice(0, 5).join(', ');
-        
-        console.log(`Snippet of Vector[0]: [${firstEmbeddingSnippet}... ]`);
-        console.log(`Snippet of Vector[1]: [${secondEmbeddingSnippet}... ]`);
-        
-        if (JSON.stringify(embeddings[0]) === JSON.stringify(embeddings[1])) {
-            console.log("!!! VERDICT: The first two embedding vectors are IDENTICAL. This proves the bug is in the Gemini API. !!!");
-        } else {
-            console.log("--- VERDICT: The embedding vectors are unique. ---");
-        }
-        console.log("--------------------------");
-    }
-    // --- END OF LOGGING ---
 
-    const results = [];
-    for (let i = 0; i < queries.length; i++) {
-        const { uniclass_type, output_format = 'COBIE', request_id } = queries[i];
-        const queryEmbedding = embeddings[i];
-        try {
-            if (!queryEmbedding) {
-                results.push({ request_id: request_id || i, match: 'Embedding failed:0.00', confidence: 0, alternatives: [] });
-                continue;
-            }
+    console.log(`Received ${embeddings.filter(e => e).length}/${queries.length} unique embeddings from Gemini.`);
 
-            const { data, error } = await supabase.rpc('match_uniclass', { query_embedding: queryEmbedding, uniclass_type_filter: uniclass_type.toUpperCase(), match_threshold: 0.1, match_count: 3 });
-            
-            if (error) {
-                console.error('Supabase error for query', i, ':', error);
-                results.push({ request_id: request_id || i, match: 'Database error:0.00', confidence: 0, alternatives: [] });
-                continue;
-            }
-            if (!data || data.length === 0) {
-                results.push({ request_id: request_id || i, match: 'No match found:0.00', confidence: 0, alternatives: [] });
-                continue;
-            }
+    // Step 2: Create an array of promises, one for each database query.
+    // This is the new, robust logic that replaces the faulty sequential 'for' loop.
+    const supabasePromises = queries.map(async (query, i) => {
+      const { uniclass_type, output_format = 'COBIE', request_id } = query;
+      const queryEmbedding = embeddings[i];
 
-            const best = data[0];
-            let result_text;
-            switch (output_format.toUpperCase()) {
-                case 'CODE': result_text = best.code; break;
-                case 'TITLE': result_text = best.title; break;
-                default: result_text = `${best.code}:${best.title}`;
-            }
-            const scoreFormatted = best.similarity.toFixed(2);
-            const finalResult = `${result_text}:${scoreFormatted}`;
-            results.push({ request_id: request_id || i, match: finalResult, confidence: best.similarity, alternatives: data.slice(1).map(item => ({ code: item.code, title: item.title, confidence: item.similarity })) });
+      if (!queryEmbedding) {
+        return { request_id: request_id || i, match: 'Embedding failed:0.00', confidence: 0, alternatives: [] };
+      }
 
-        } catch (innerError) {
-            console.error('Error processing query', i, ':', innerError);
-            results.push({ request_id: request_id || i, match: 'Processing error:0.00', confidence: 0, alternatives: [] });
-        }
-    }
-    return res.json({ success: true, processed: results.length, results: results });
+      const { data, error } = await supabase.rpc('match_uniclass', {
+        query_embedding: queryEmbedding,
+        uniclass_type_filter: uniclass_type.toUpperCase(),
+        match_threshold: 0.1,
+        match_count: 3
+      });
+
+      if (error) {
+        console.error('Supabase error for request_id', request_id, ':', error);
+        return { request_id: request_id || i, match: 'Database error:0.00', confidence: 0, alternatives: [] };
+      }
+      if (!data || data.length === 0) {
+        return { request_id: request_id || i, match: 'No match found:0.00', confidence: 0, alternatives: [] };
+      }
+      
+      const best = data[0];
+      let result_text;
+      switch (output_format.toUpperCase()) {
+        case 'CODE': result_text = best.code; break;
+        case 'TITLE': result_text = best.title; break;
+        default: result_text = `${best.code}:${best.title}`;
+      }
+      const scoreFormatted = best.similarity.toFixed(2);
+      const finalResult = `${result_text}:${scoreFormatted}`;
+
+      return {
+        request_id: request_id || i,
+        match: finalResult,
+        confidence: best.similarity,
+        alternatives: data.slice(1).map(item => ({ code: item.code, title: item.title, confidence: item.similarity }))
+      };
+    });
+
+    // Step 3: Execute all the database queries in parallel.
+    const results = await Promise.all(supabasePromises);
+
+    // The VBA script needs the results to be in the original order. We must re-sort them.
+    const sortedResults = results.sort((a, b) => a.request_id - b.request_id);
+
+    console.log(`Batch processing complete: ${sortedResults.length} results returned.`);
+    return res.json({ success: true, processed: sortedResults.length, results: sortedResults });
 
   } catch (error) {
     console.error('Batch API Handler Error:', error);

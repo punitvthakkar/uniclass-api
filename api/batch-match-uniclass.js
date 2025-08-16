@@ -1,5 +1,3 @@
-
-
 import { createClient } from '@supabase/supabase-js'
 
 export default async function handler(req, res) {
@@ -23,7 +21,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing or invalid queries array' })
     }
     
-    // We can increase this limit now as our function can handle more
     if (queries.length > 2000) {
       return res.status(400).json({ error: 'Maximum 2000 queries per batch' })
     }
@@ -36,9 +33,6 @@ export default async function handler(req, res) {
     )
 
     const queryTexts = queries.map(q => q.query)
-
-    // --- START OF MODIFIED LOGIC ---
-    // This section now handles chunking the requests to Gemini
     
     const CHUNK_SIZE = 100; // Gemini API limit
     const embeddingPromises = [];
@@ -47,17 +41,11 @@ export default async function handler(req, res) {
 
     for (let i = 0; i < queryTexts.length; i += CHUNK_SIZE) {
       const chunk = queryTexts.slice(i, i + CHUNK_SIZE);
-      // Add the promise for each chunk to an array
       embeddingPromises.push(getBatchEmbeddings(chunk));
     }
     
-    // Await all promises to resolve in parallel
     const embeddingChunks = await Promise.all(embeddingPromises);
-    
-    // Flatten the array of arrays into a single array of embeddings
     const embeddings = embeddingChunks.flat();
-
-    // --- END OF MODIFIED LOGIC ---
 
     if (!embeddings || embeddings.length !== queryTexts.length) {
       console.error('Failed to get batch embeddings or count mismatch after chunking.');
@@ -164,20 +152,21 @@ export default async function handler(req, res) {
   }
 }
 
-
 async function getBatchEmbeddings(texts) {
-  // This function is now perfect, it handles one valid-sized chunk at a time. No changes needed here.
   try {
     console.log(`Getting batch embeddings for a chunk of ${texts.length} texts.`);
     
+    // --- START OF MODIFIED SECTION ---
+    // Corrected the request body to REMOVE the 'model' key from each request item.
+    // The model is already specified in the fetch URL.
     const requestBody = {
       requests: texts.map(text => ({
-        model: 'models/text-embedding-004',
         content: {
           parts: [{ text: text }]
         }
       }))
     };
+    // --- END OF MODIFIED SECTION ---
 
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${process.env.GEMINI_API_KEY}`,
@@ -205,7 +194,6 @@ async function getBatchEmbeddings(texts) {
     
   } catch (error) {
     console.error('Batch embedding function error:', error);
-    // Return an array of nulls of the same length to prevent crashing the main loop
     return new Array(texts.length).fill(null);
   }
 }

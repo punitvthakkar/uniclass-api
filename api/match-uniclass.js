@@ -10,14 +10,14 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end()
   }
-
+  
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
   try {
     const { query, uniclass_type, output_format = 'COBIE' } = req.body
-
+    
     if (!query || !uniclass_type) {
       return res.status(400).json({ error: 'Missing query or uniclass_type' })
     }
@@ -49,7 +49,7 @@ export default async function handler(req, res) {
 
     if (!data || data.length === 0) {
       return res.json({
-        match: 'No match found',
+        match: 'No match found:0.00',
         confidence: 0,
         alternatives: []
       })
@@ -57,7 +57,8 @@ export default async function handler(req, res) {
 
     const best = data[0]
     let result_text
-
+    
+    // Format the base result without score
     switch (output_format.toUpperCase()) {
       case 'CODE':
         result_text = best.code
@@ -68,9 +69,13 @@ export default async function handler(req, res) {
       default: // 'COBIE'
         result_text = `${best.code}:${best.title}`
     }
+    
+    // Always append score with 2 decimal places
+    const scoreFormatted = best.similarity.toFixed(2)
+    const finalResult = `${result_text}:${scoreFormatted}`
 
     res.json({
-      match: result_text,
+      match: finalResult,
       confidence: best.similarity,
       alternatives: data.slice(1).map(item => ({
         code: item.code,
@@ -105,6 +110,7 @@ async function getEmbedding(text) {
 
     const data = await response.json()
     return data.embedding?.values || null
+    
   } catch (error) {
     console.error('Embedding error:', error)
     return null
